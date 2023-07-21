@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
@@ -15,7 +16,6 @@ import (
 // Interface guards.
 var (
 	_ caddyfile.Unmarshaler       = (*OndemandUpstreams)(nil)
-	_ caddy.Provisioner           = (*OndemandUpstreams)(nil)
 	_ caddy.Validator             = (*OndemandUpstreams)(nil)
 	_ caddy.CleanerUpper          = (*OndemandUpstreams)(nil)
 	_ reverseproxy.UpstreamSource = (*OndemandUpstreams)(nil)
@@ -50,14 +50,10 @@ type OndemandUpstreams struct {
 
 	// Optional. The working directory to use for the upstream process. If not
 	// set, the current working directory will be used.
-	// Dir string `json:"dir,omitempty"`
-
-	// Optional. The user to run the process as. If not set, the process will be
-	// run as the current user.
-	// User string `json:"user,omitempty"`
+	Dir string `json:"dir,omitempty"`
 
 	// Optional. A list of environment variables to set for the process.
-	// Env map[string]string `json:"env,omitempty"`
+	Env map[string]string `json:"env,omitempty"`
 
 	// Optional. The number of seconds that the process should continue running
 	// if no traffic is received. Set to -1 to disable process termination.
@@ -66,7 +62,7 @@ type OndemandUpstreams struct {
 
 	// Optional. The amount of time to wait for the application to gracefully
 	// shut down before killing it (after idle_timeout). Default: 10 seconds.
-	// TerminationGracePeriod caddy.Duration `json:"termination_grace_period,omitempty"`
+	TerminationGracePeriod caddy.Duration `json:"termination_grace_period,omitempty"`
 
 	// Optional. Redirect stdout to a file. If not set, stdout will be sent to
 	// Caddy's stdout.
@@ -125,6 +121,34 @@ func (o *OndemandUpstreams) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				o.Port = i
 				caddy.Log().Named(CHANNEL).Info("port: " + d.Val())
 
+			case "dir":
+				caddy.Log().Named(CHANNEL).Info("parsing dir")
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				if o.Dir != "" {
+					return d.Err("dir has already been specified")
+				}
+				o.Dir = d.Val()
+				caddy.Log().Named(CHANNEL).Info("dir: " + o.Dir)
+
+			case "env":
+				caddy.Log().Named(CHANNEL).Info("parsing env")
+				var envKey, envValue string
+
+				if !d.Args(&envKey, &envValue) {
+					return d.ArgErr()
+				}
+				remaining := d.RemainingArgs()
+
+				if len(remaining) != 0 {
+					envValue = fmt.Sprintf("%s %s", envValue, strings.Join(remaining, " "))
+				}
+				if o.Env == nil {
+					o.Env = make(map[string]string)
+				}
+				o.Env[envKey] = envValue
+
 			case "startup_delay":
 				caddy.Log().Named(CHANNEL).Info("parsing startup_delay")
 				if !d.NextArg() {
@@ -139,6 +163,21 @@ func (o *OndemandUpstreams) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				}
 				o.StartupDelay = caddy.Duration(dur)
 				caddy.Log().Named(CHANNEL).Info("startup_delay: " + d.Val())
+
+			case "termination_grace_period":
+				caddy.Log().Named(CHANNEL).Info("parsing termination_grace_period")
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				if o.TerminationGracePeriod != 0 {
+					return d.Err("termination_grace_period has already been specified")
+				}
+				dur, err := caddy.ParseDuration(d.Val())
+				if err != nil {
+					return d.Errf("invalid duration: %v", err)
+				}
+				o.TerminationGracePeriod = caddy.Duration(dur)
+				caddy.Log().Named(CHANNEL).Info("termination_grace_period: " + d.Val())
 
 			case "idle_timeout":
 				caddy.Log().Named(CHANNEL).Info("parsing idle_timeout")
@@ -161,12 +200,6 @@ func (o *OndemandUpstreams) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	return nil
 }
 
-// Provision implements caddy.Provisioner.
-func (o *OndemandUpstreams) Provision(ctx caddy.Context) error {
-	caddy.Log().Named(CHANNEL).Info("ondemand_upstream provisioned")
-	return nil
-}
-
 // Validate implements caddy.Validator.
 func (o *OndemandUpstreams) Validate() error {
 	caddy.Log().Named(CHANNEL).Info("ondemand_upstream validate")
@@ -180,10 +213,14 @@ func (o *OndemandUpstreams) Validate() error {
 		caddy.Log().Named(CHANNEL).Info("idle_timeout: " + fmt.Sprint(o.IdleTimeout))
 	}
 
+	if o.TerminationGracePeriod == caddy.Duration(0) {
+		o.TerminationGracePeriod = caddy.Duration(10 * time.Second)
+		caddy.Log().Named(CHANNEL).Info("termination_grace_period: " + fmt.Sprint(o.TerminationGracePeriod))
+	}
+
 	if o.Port == 0 {
 		o.Port = -1
 	}
-
 	caddy.Log().Named(CHANNEL).Info("port: " + strconv.Itoa(o.Port))
 
 	return nil
@@ -195,7 +232,7 @@ func (o *OndemandUpstreams) GetUpstreams(r *http.Request) ([]*reverseproxy.Upstr
 
 	if o.upstreamProcess == nil {
 		// Create a new upstream process.
-		o.upstreamProcess = NewUpstreamProcess(o.Command, o.Port, time.Duration(o.StartupDelay), time.Duration(o.IdleTimeout))
+		o.upstreamProcess = NewUpstreamProcess(o.Command, o.Port, o.Dir, o.Env, time.Duration(o.StartupDelay), time.Duration(o.IdleTimeout), time.Duration(o.TerminationGracePeriod))
 	}
 
 	o.upstreamProcess.Start()

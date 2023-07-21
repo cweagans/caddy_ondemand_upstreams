@@ -13,22 +13,28 @@ import (
 )
 
 type UpstreamProcess struct {
-	cmd          *exec.Cmd
-	command      string
-	port         int
-	startupDelay time.Duration
-	idleTimeout  time.Duration
-	lastActivity time.Time
-	mu           sync.Mutex
+	cmd                    *exec.Cmd
+	command                string
+	port                   int
+	dir                    string
+	env                    map[string]string
+	startupDelay           time.Duration
+	idleTimeout            time.Duration
+	terminationGracePeriod time.Duration
+	lastActivity           time.Time
+	mu                     sync.Mutex
 }
 
-func NewUpstreamProcess(command string, port int, startup_delay time.Duration, idle_timeout time.Duration) *UpstreamProcess {
+func NewUpstreamProcess(command string, port int, dir string, env map[string]string, startup_delay time.Duration, idle_timeout time.Duration, termination_grace_period time.Duration) *UpstreamProcess {
 	return &UpstreamProcess{
-		command:      command,
-		port:         port,
-		startupDelay: startup_delay,
-		idleTimeout:  idle_timeout,
-		lastActivity: time.Now(),
+		command:                command,
+		port:                   port,
+		dir:                    dir,
+		env:                    env,
+		startupDelay:           startup_delay,
+		idleTimeout:            idle_timeout,
+		terminationGracePeriod: termination_grace_period,
+		lastActivity:           time.Now(),
 	}
 }
 
@@ -70,6 +76,10 @@ func (u *UpstreamProcess) Start() error {
 	u.cmd = exec.Command("sh", "-c", c)
 	u.cmd.Stdout = os.Stdout
 	u.cmd.Stderr = os.Stderr
+	u.cmd.Dir = u.dir
+	for k, v := range u.env {
+		u.cmd.Env = append(u.cmd.Env, fmt.Sprintf("%s=%s", k, v))
+	}
 
 	caddy.Log().Named(CHANNEL).Info("starting upstream process")
 	err := u.cmd.Start()
@@ -121,8 +131,7 @@ func (u *UpstreamProcess) Stop() {
 	if err == nil {
 		go func() {
 			// Wait for the termination grace period.
-			// TODO: Wire up config opt for this.
-			time.Sleep(5 * time.Second)
+			time.Sleep(u.terminationGracePeriod)
 			if u.IsRunning() {
 				caddy.Log().Named(CHANNEL).Info("grace period expired; sending SIGKILL to stop the process")
 				u.cmd.Process.Kill()
